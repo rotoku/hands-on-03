@@ -1,0 +1,13 @@
+# To get started with Dependabot, see the documentation:
+# https://docs.github.com/en/github/administering-a-repository/configuration-options-for-dependency-updates
+
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "terraform"
+    directory: "infra/"
+    schedule:
+      interval: "weekly"

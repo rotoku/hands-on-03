@@ -1,0 +1,95 @@
+name: Deploy SQS Lambda Processor
+
+on:
+  push:
+    branches:
+      - main # Ou sua branch de deploy
+  workflow_dispatch: # Permite acionamento manual
+
+permissions:
+  id-token: write # Necessário para autenticação OIDC com a AWS
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy to AWS
+    runs-on: ubuntu-latest
+    environment: production # Opcional: defina um ambiente no GitHub com secrets
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ secrets.AWS_IAM_ROLE_NAME }} # Role para GitHub Actions
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }} # Use vars do GitHub ou defina aqui
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Lambda dependencies
+        working-directory: ./src
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt -t ./packages; fi
+          # Se 'packages' não for usado diretamente pelo archive_file, copie para src ou ajuste o source_dir do archive_file
+          # O archive_file do Terraform empacota o source_dir, então as dependências precisam estar lá.
+          # Uma forma é instalar em `src/` ou em um subdiretório e incluir no zip.
+          # Alternativamente, crie o zip aqui e passe para o Terraform.
+          # Para simplificar com archive_file, garanta que `pip install -r requirements.txt -t .` (dentro de src) seja feito
+          # ou que o zip seja criado manualmente no pipeline e o terraform use esse zip.
+          # O provider archive_file não roda `pip install`.
+          # Solução: Criar o zip no pipeline e usar `filename` em `aws_lambda_function` apontando para ele.
+          # Vamos ajustar o Terraform e este pipeline para usar um zip criado aqui.
+
+      - name: Create Lambda deployment package
+        working-directory: ./src
+        run: |
+          if [ -d "packages" ]; then cp -r packages/* .; rm -rf packages; fi # Copia dependências para a raiz de src
+          zip -r ../lambda_package.zip ./*
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.5.0" # Especifique sua versão do Terraform
+
+      - name: Terraform Init
+        id: init
+        working-directory: ./terraform
+        run: terraform init
+        env:
+          # TF_VAR_datadog_api_key: ${{ secrets.DATADOG_API_KEY }} # Se não estiver no Secrets Manager
+          TF_VAR_aws_region: ${{ vars.AWS_REGION || 'us-east-1' }}
+          # Adicione outras TF_VAR_* conforme necessário para suas variáveis do Terraform
+          TF_VAR_dd_env: "prod" # Exemplo, pode vir de vars do GitHub
+          TF_VAR_dd_service: "sqs-processor-service-prod"
+          TF_VAR_dd_version: "${{ github.sha }}" # Usa o commit SHA como versão
+
+      - name: Terraform Validate
+        id: validate
+        working-directory: ./terraform
+        run: terraform validate -no-color
+
+      - name: Terraform Plan
+        id: plan
+        working-directory: ./terraform
+        run: terraform plan -no-color -input=false -out=tfplan
+        # Adicione -var="datadog_api_key=${{ secrets.DATADOG_API_KEY }}" se não usar TF_VAR_
+
+      - name: Terraform Apply
+        id: apply
+        working-directory: ./terraform
+        # Apenas aplicar na branch 'main' ou em merges para 'main'
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        run: terraform apply -auto-approve -input=false tfplan
+
+    # Configuração de Secrets e Variáveis no GitHub:
+    # 1. AWS_ACCOUNT_ID: ID da sua conta AWS.
+    # 2. AWS_IAM_ROLE_NAME: Nome da role IAM na AWS que o GitHub Actions irá assumir (configurada com OIDC).
+    # 3. (Opcional) DATADOG_API_KEY: Sua API Key do Datadog, se não for gerenciada pelo AWS Secrets Manager.
+    #    Use GitHub Secrets para isso.
+    # 4. (Opcional) AWS_REGION: Região AWS (pode ser uma GitHub Variable).
